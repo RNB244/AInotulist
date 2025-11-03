@@ -1,24 +1,14 @@
 import streamlit as st
-# Probeer diverse modulenaam-varianten voor de audio-recorder
+# Gebruik altijd de audio_recorder_streamlit component (handmatig start/stop)
 HAVE_RECORDER = False
-RECORDER_KIND = None  # 'audiorec' | 'audiorecorder' | 'ars'
+RECORDER_KIND = None  # 'ars'
 try:
-    from streamlit_audiorec import st_audiorec  # meest gebruikelijke modulenaam
+    from audio_recorder_streamlit import audio_recorder  # handmatige start/stop door mic opnieuw te klikken
     HAVE_RECORDER = True
-    RECORDER_KIND = 'audiorec'
+    RECORDER_KIND = 'ars'
 except Exception:
-    try:
-        from streamlit_audiorecorder import st_audiorec  # alternatieve naam
-        HAVE_RECORDER = True
-        RECORDER_KIND = 'audiorecorder'
-    except Exception:
-        try:
-            from audio_recorder_streamlit import audio_recorder  # fallback package
-            HAVE_RECORDER = True
-            RECORDER_KIND = 'ars'
-        except Exception:
-            HAVE_RECORDER = False
-            RECORDER_KIND = None
+    HAVE_RECORDER = False
+    RECORDER_KIND = None
 import whisper
 from summarize import summarize_text
 from utils import save_pdf
@@ -73,12 +63,12 @@ if mode == "🎙️ Opnemen":
         st.warning("Opnemen is niet beschikbaar (module kon niet geladen worden). Kies \"Uploaden\".")
     else:
         try:
-            if RECORDER_KIND == 'ars':
-                # audio-recorder-streamlit
-                audio_bytes = audio_recorder(text="Klik om op te nemen", sample_rate=16000)
-            else:
-                # streamlit-audiorec/streamlit-audiorecorder
-                audio_bytes = st_audiorec()
+            # audio-recorder-streamlit: klik om te starten, klik opnieuw om te stoppen
+            st.caption("Klik op de microfoon om te starten, klik opnieuw om te stoppen. De opname stopt NIET automatisch bij stilte.")
+            audio_bytes = audio_recorder(
+                text="Start/stop opname",
+                sample_rate=16000,
+            )
         except Exception:
             st.warning("Audio opnemen niet beschikbaar. Gebruik upload.")
 elif mode == "📁 Uploaden":

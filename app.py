@@ -20,6 +20,13 @@ import sys
 import shutil
 import traceback
 import subprocess
+from io import BytesIO
+from typing import Optional
+try:
+    from pydub import AudioSegment, effects
+    HAVE_PYDUB = True
+except Exception:
+    HAVE_PYDUB = False
 
 # Helper voor bestandsnamen
 def get_filename(base, ext, title=None):
@@ -43,9 +50,20 @@ def get_whisper_model(name: str):
 with st.sidebar:
     model_size = st.selectbox(
         "Whisper model",
-        ["tiny", "base", "small"],
-        index=0,
-        help="Kleinere modellen zijn sneller/goedkoper op de cloud."
+        ["tiny", "base", "small", "medium"],
+        index=2,
+        help="Grotere modellen zijn nauwkeuriger maar trager."
+    )
+    cleanup_audio = st.checkbox(
+        "Audio optimaliseren (normaliseren + high-pass)",
+        value=True,
+        help=("Verbetert verstaanbaarheid bij zachte opnames. Vereist pydub/ffmpeg." 
+              + (" (pydub beschikbaar)" if HAVE_PYDUB else " (pydub niet beschikbaar)") )
+    )
+    custom_prompt = st.text_input(
+        "Voorkeurtermen/namen (optioneel)",
+        placeholder="Bijv. namen, vakjargon, bedrijfsnamen",
+        help="Wordt als hint meegegeven aan Whisper voor betere herkenning."
     )
 
 # Meeting-titel invoer
@@ -81,15 +99,40 @@ if audio_bytes:
     # Schrijf naar tijdelijk bestand zodat ffmpeg/whisper het kan lezen
     tmp_path = None
     try:
+        # Maak een tijdelijk WAV-bestand, eventueel met audio-cleanup (mono, 16k, normalisatie)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            tmp.write(audio_bytes)
             tmp_path = tmp.name
+        if HAVE_PYDUB and cleanup_audio:
+            try:
+                seg = AudioSegment.from_file(BytesIO(audio_bytes))
+                seg = seg.set_channels(1)
+                seg = seg.set_frame_rate(16000)
+                seg = effects.normalize(seg)
+                # eenvoudige high-pass om lage brom te verminderen
+                seg = seg.high_pass_filter(100)
+                seg.export(tmp_path, format="wav")
+            except Exception:
+                # val terug op ruwe bytes
+                with open(tmp_path, "wb") as f:
+                    f.write(audio_bytes)
+        else:
+            with open(tmp_path, "wb") as f:
+                f.write(audio_bytes)
 
         # Laad (of hergebruik) model
         model = get_whisper_model(model_size)
         with st.spinner("Transcriptie in uitvoering…"):
-            # fp16=False i.v.m. CPU; temperature=0 voor deterministischer output
-            result = model.transcribe(tmp_path, language="nl", fp16=False, temperature=0)
+            # CPU-vriendelijk en nauwkeuriger decode: beam search + NL hint
+            transcribe_kwargs = dict(
+                language="nl",
+                fp16=False,
+                temperature=0,
+                beam_size=5,
+                condition_on_previous_text=False,
+            )
+            if custom_prompt:
+                transcribe_kwargs["initial_prompt"] = custom_prompt
+            result = model.transcribe(tmp_path, **transcribe_kwargs)
         transcript = result.get("text", "")
     except Exception as e:
         st.error("Er ging iets mis tijdens de transcriptie.")

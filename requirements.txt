@@ -4,3 +4,4 @@ torch
 reportlab
 audio-recorder-streamlit
 ollama # optional for local LLM
+pydub

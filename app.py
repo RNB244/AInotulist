@@ -26,6 +26,10 @@ from datetime import datetime
 import os
 import os
 import tempfile
+import sys
+import shutil
+import traceback
+import subprocess
 
 # Helper voor bestandsnamen
 def get_filename(base, ext, title=None):
@@ -43,13 +47,14 @@ st.markdown("Neem op of upload audio → krijg transcript + samenvatting.")
 # Whisper modelkeuze (Cloud-vriendelijk standaard 'base') en caching
 @st.cache_resource(show_spinner=False)
 def get_whisper_model(name: str):
-    return whisper.load_model(name)
+    # Forceer CPU in de cloud en voorkom half-precision issues
+    return whisper.load_model(name, device="cpu")
 
 with st.sidebar:
     model_size = st.selectbox(
         "Whisper model",
         ["tiny", "base", "small"],
-        index=1,
+        index=0,
         help="Kleinere modellen zijn sneller/goedkoper op de cloud."
     )
 
@@ -93,10 +98,13 @@ if audio_bytes:
         # Laad (of hergebruik) model
         model = get_whisper_model(model_size)
         with st.spinner("Transcriptie in uitvoering…"):
-            result = model.transcribe(tmp_path, language="nl")
+            # fp16=False i.v.m. CPU; temperature=0 voor deterministischer output
+            result = model.transcribe(tmp_path, language="nl", fp16=False, temperature=0)
         transcript = result.get("text", "")
     except Exception as e:
         st.error("Er ging iets mis tijdens de transcriptie.")
+        # Bewaar laatste exception voor diagnosepaneel
+        st.session_state["last_error"] = traceback.format_exc()
         st.exception(e)
         transcript = ""
     finally:
@@ -162,3 +170,22 @@ button, .stButton>button {font-size:18px !important; padding:16px 32px; border-r
 .stDownloadButton>button {font-size:18px !important; padding:16px 32px; border-radius:12px;}
 </style>
 """, unsafe_allow_html=True)
+
+# Diagnostiek-paneel voor snelle probleemoplossing
+with st.expander("🔎 Diagnostiek"):
+    try:
+        import torch
+        device = "cuda" if getattr(torch, "cuda", None) and torch.cuda.is_available() else "cpu"
+        st.write({
+            "python": sys.version.split(" ")[0],
+            "whisper_version": getattr(whisper, "__version__", "unknown"),
+            "torch_version": getattr(torch, "__version__", "not installed"),
+            "device": device,
+            "ffmpeg_path": shutil.which("ffmpeg"),
+            "model_selected": model_size,
+        })
+    except Exception:
+        st.write("Kon diagnose-info niet ophalen.")
+    # Laat laatste fout zien indien aanwezig
+    if "last_error" in st.session_state:
+        st.code(st.session_state["last_error"], language="text")

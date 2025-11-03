@@ -131,7 +131,11 @@ if audio_bytes:
     st.download_button("⬇️ Download transcriptie", transcript.encode(), file_name=transcript_filename)
 
     st.subheader("⚙️ Kies samenvattingsstijl")
-    style = st.selectbox("", ["Korte tekst", "Bulletpoints", "Actiepunten"])
+    style = st.selectbox(
+        label="Kies samenvattingsstijl",
+        options=["Korte tekst", "Bulletpoints", "Actiepunten"],
+        label_visibility="collapsed",
+    )
 
     summary, actions = summarize_text(transcript, style)
 

@@ -25,6 +25,7 @@ from utils import save_pdf
 from datetime import datetime
 import os
 import os
+import tempfile
 
 # Helper voor bestandsnamen
 def get_filename(base, ext, title=None):
@@ -38,6 +39,19 @@ st.set_page_config(page_title="AI Vergader Samenvatter", layout="centered")
 
 st.title("🎧 AI Vergader Samenvatter")
 st.markdown("Neem op of upload audio → krijg transcript + samenvatting.")
+
+# Whisper modelkeuze (Cloud-vriendelijk standaard 'base') en caching
+@st.cache_resource(show_spinner=False)
+def get_whisper_model(name: str):
+    return whisper.load_model(name)
+
+with st.sidebar:
+    model_size = st.selectbox(
+        "Whisper model",
+        ["tiny", "base", "small"],
+        index=1,
+        help="Kleinere modellen zijn sneller/goedkoper op de cloud."
+    )
 
 # Meeting-titel invoer
 meeting_title = st.text_input("Meeting titel (optioneel)", "")
@@ -69,15 +83,32 @@ elif mode == "📁 Uploaden":
 
 if audio_bytes:
     st.info("Bezig met transcriberen... ⏳")
-    filename = get_filename("meeting", "wav", meeting_title)
-    with open(filename, "wb") as f:
-        f.write(audio_bytes)
+    # Schrijf naar tijdelijk bestand zodat ffmpeg/whisper het kan lezen
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = tmp.name
 
-    model = whisper.load_model("small")
-    result = model.transcribe(filename, language="nl")
-    transcript = result["text"]
+        # Laad (of hergebruik) model
+        model = get_whisper_model(model_size)
+        with st.spinner("Transcriptie in uitvoering…"):
+            result = model.transcribe(tmp_path, language="nl")
+        transcript = result.get("text", "")
+    except Exception as e:
+        st.error("Er ging iets mis tijdens de transcriptie.")
+        st.exception(e)
+        transcript = ""
+    finally:
+        # Opruimen van temp bestand
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 
-    st.success("✅ Transcriptie voltooid")
+    if transcript:
+        st.success("✅ Transcriptie voltooid")
     st.subheader("📝 Transcriptie")
 
     # Zoekfunctie in transcriptie
@@ -112,12 +143,16 @@ if audio_bytes:
     pdf_filename = get_filename("samenvatting", "pdf", meeting_title)
     st.download_button("⬇️ Download PDF", pdf_file, file_name=pdf_filename)
 
-    # Save summary PDF locally
-    summaries_dir = "summaries"
-    if not os.path.exists(summaries_dir):
-        os.makedirs(summaries_dir)
-    with open(os.path.join(summaries_dir, pdf_filename), "wb") as f:
-        f.write(pdf_file)
+    # Save summary PDF locally (non-persistent op Cloud, maar handig lokaal)
+    try:
+        summaries_dir = "summaries"
+        if not os.path.exists(summaries_dir):
+            os.makedirs(summaries_dir)
+        with open(os.path.join(summaries_dir, pdf_filename), "wb") as f:
+            f.write(pdf_file)
+    except Exception:
+        # Geen fatale fout als we niet kunnen schrijven
+        pass
 
 st.markdown("""
 <style>

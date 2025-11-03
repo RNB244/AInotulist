@@ -1,0 +1,7 @@
+streamlit
+openai-whisper
+torch
+reportlab
+streamlit-audio-recorder
+audio-recorder-streamlit
+ollama # optional for local LLM

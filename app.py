@@ -1,0 +1,129 @@
+import streamlit as st
+# Probeer diverse modulenaam-varianten voor de audio-recorder
+HAVE_RECORDER = False
+RECORDER_KIND = None  # 'audiorec' | 'audiorecorder' | 'ars'
+try:
+    from streamlit_audiorec import st_audiorec  # meest gebruikelijke modulenaam
+    HAVE_RECORDER = True
+    RECORDER_KIND = 'audiorec'
+except Exception:
+    try:
+        from streamlit_audiorecorder import st_audiorec  # alternatieve naam
+        HAVE_RECORDER = True
+        RECORDER_KIND = 'audiorecorder'
+    except Exception:
+        try:
+            from audio_recorder_streamlit import audio_recorder  # fallback package
+            HAVE_RECORDER = True
+            RECORDER_KIND = 'ars'
+        except Exception:
+            HAVE_RECORDER = False
+            RECORDER_KIND = None
+import whisper
+from summarize import summarize_text
+from utils import save_pdf
+from datetime import datetime
+import os
+import os
+
+# Helper voor bestandsnamen
+def get_filename(base, ext, title=None):
+    date = datetime.now().strftime('%Y%m%d_%H%M%S')
+    if title:
+        safe_title = "_".join(title.split())
+        return f"{base}_{safe_title}_{date}.{ext}"
+    return f"{base}_{date}.{ext}"
+
+st.set_page_config(page_title="AI Vergader Samenvatter", layout="centered")
+
+st.title("🎧 AI Vergader Samenvatter")
+st.markdown("Neem op of upload audio → krijg transcript + samenvatting.")
+
+# Meeting-titel invoer
+meeting_title = st.text_input("Meeting titel (optioneel)", "")
+
+st.markdown("---")
+# Als recorder niet beschikbaar is, standaard op "Uploaden" zetten
+mode = st.radio("📤 Kies invoer", ["🎙️ Opnemen", "📁 Uploaden"], index=(1 if not HAVE_RECORDER else 0))
+if not HAVE_RECORDER:
+    st.info("Opnemen-module niet gevonden. Uploaden is wel beschikbaar. (Installeer optioneel 'audio-recorder-streamlit' of 'streamlit-audiorec')")
+
+audio_bytes = None
+if mode == "🎙️ Opnemen":
+    if not HAVE_RECORDER:
+        st.warning("Opnemen is niet beschikbaar (module kon niet geladen worden). Kies \"Uploaden\".")
+    else:
+        try:
+            if RECORDER_KIND == 'ars':
+                # audio-recorder-streamlit
+                audio_bytes = audio_recorder(text="Klik om op te nemen", sample_rate=16000)
+            else:
+                # streamlit-audiorec/streamlit-audiorecorder
+                audio_bytes = st_audiorec()
+        except Exception:
+            st.warning("Audio opnemen niet beschikbaar. Gebruik upload.")
+elif mode == "📁 Uploaden":
+    uploaded = st.file_uploader("Upload MP3 of WAV", type=["mp3", "wav"])
+    if uploaded:
+        audio_bytes = uploaded.read()
+
+if audio_bytes:
+    st.info("Bezig met transcriberen... ⏳")
+    filename = get_filename("meeting", "wav", meeting_title)
+    with open(filename, "wb") as f:
+        f.write(audio_bytes)
+
+    model = whisper.load_model("small")
+    result = model.transcribe(filename, language="nl")
+    transcript = result["text"]
+
+    st.success("✅ Transcriptie voltooid")
+    st.subheader("📝 Transcriptie")
+
+    # Zoekfunctie in transcriptie
+    search_query = st.text_input("🔍 Zoek in transcriptie", "")
+    if search_query:
+        found = [line for line in transcript.splitlines() if search_query.lower() in line.lower()]
+        st.text_area("Resultaten", "\n".join(found) if found else "Geen resultaten.", height=150)
+    st.text_area("Volledige transcriptie", transcript, height=250)
+
+    # Downloadbare transcriptie
+    transcript_filename = get_filename("transcript", "txt", meeting_title)
+    st.download_button("⬇️ Download transcriptie", transcript.encode(), file_name=transcript_filename)
+
+    st.subheader("⚙️ Kies samenvattingsstijl")
+    style = st.selectbox("", ["Korte tekst", "Bulletpoints", "Actiepunten"])
+
+    summary, actions = summarize_text(transcript, style)
+
+    st.subheader("📋 Samenvatting")
+    st.write(summary)
+    if actions:
+        st.markdown("### ✅ Actiepunten")
+        for a in actions:
+            st.markdown(f"- {a}")
+
+    # Downloadbare actiepunten
+    if actions:
+        actions_filename = get_filename("actiepunten", "txt", meeting_title)
+        st.download_button("⬇️ Download actiepunten", "\n".join(actions).encode(), file_name=actions_filename)
+
+    pdf_file = save_pdf(summary, actions)
+    pdf_filename = get_filename("samenvatting", "pdf", meeting_title)
+    st.download_button("⬇️ Download PDF", pdf_file, file_name=pdf_filename)
+
+    # Save summary PDF locally
+    summaries_dir = "summaries"
+    if not os.path.exists(summaries_dir):
+        os.makedirs(summaries_dir)
+    with open(os.path.join(summaries_dir, pdf_filename), "wb") as f:
+        f.write(pdf_file)
+
+st.markdown("""
+<style>
+textarea {font-size:18px !important;}
+button, .stButton>button {font-size:18px !important; padding:16px 32px; border-radius:12px;}
+.stTextInput>div>input {font-size:20px !important; padding:12px;}
+.stDownloadButton>button {font-size:18px !important; padding:16px 32px; border-radius:12px;}
+</style>
+""", unsafe_allow_html=True)

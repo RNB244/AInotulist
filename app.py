@@ -28,6 +28,22 @@ try:
 except Exception:
     HAVE_PYDUB = False
 
+# Audio splitter helper
+def split_audio_bytes(audio_bytes, chunk_minutes=10):
+    """
+    Split audio bytes (mp3/wav/m4a) into chunks of chunk_minutes (default 10 min).
+    Returns list of AudioSegment objects.
+    """
+    if not HAVE_PYDUB:
+        return [audio_bytes]
+    seg = AudioSegment.from_file(BytesIO(audio_bytes))
+    chunk_ms = chunk_minutes * 60 * 1000
+    chunks = []
+    for start in range(0, len(seg), chunk_ms):
+        end = min(start + chunk_ms, len(seg))
+        chunks.append(seg[start:end])
+    return chunks
+
 # Vragenlijst helpers
 from questionnaire import load_questions_from_docx, assign_segments_to_questions, flatten_mapping_to_text
 from utils_questionnaire import build_docx_with_notes
@@ -119,29 +135,25 @@ elif mode == "📁 Uploaden":
 
 if audio_bytes:
     st.info("Bezig met transcriberen... ⏳")
-    tmp_path = None
     transcript = ""
     segments = []
-    try:
+    chunk_minutes = 10
+    audio_chunks = split_audio_bytes(audio_bytes, chunk_minutes=chunk_minutes)
+    all_transcripts = []
+    all_segments = []
+    model = get_whisper_model(model_size)
+    for i, chunk in enumerate(audio_chunks):
+        st.info(f"Transcriberen deel {i+1} van {len(audio_chunks)}...")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
             tmp_path = tmp.name
-        if HAVE_PYDUB and cleanup_audio:
-            try:
-                seg = AudioSegment.from_file(BytesIO(audio_bytes))
-                seg = seg.set_channels(1)
-                seg = seg.set_frame_rate(16000)
+        try:
+            if HAVE_PYDUB and cleanup_audio:
+                seg = chunk.set_channels(1).set_frame_rate(16000)
                 seg = effects.normalize(seg)
                 seg = seg.high_pass_filter(100)
                 seg.export(tmp_path, format="wav")
-            except Exception:
-                with open(tmp_path, "wb") as f:
-                    f.write(audio_bytes)
-        else:
-            with open(tmp_path, "wb") as f:
-                f.write(audio_bytes)
-
-        model = get_whisper_model(model_size)
-        with st.spinner("Transcriptie in uitvoering…"):
+            else:
+                chunk.export(tmp_path, format="wav")
             transcribe_kwargs = dict(
                 language="nl",
                 fp16=False,
@@ -152,19 +164,19 @@ if audio_bytes:
             if custom_prompt:
                 transcribe_kwargs["initial_prompt"] = custom_prompt
             result = model.transcribe(tmp_path, **transcribe_kwargs)
-        transcript = result.get("text", "")
-        segments = result.get("segments", []) or []
-    except Exception as e:
-        st.error("Er ging iets mis tijdens de transcriptie.")
-        st.session_state["last_error"] = traceback.format_exc()
-        st.exception(e)
-        transcript = ""
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+            all_transcripts.append(result.get("text", ""))
+            all_segments.extend(result.get("segments", []) or [])
+        except Exception as e:
+            st.error(f"Fout bij deel {i+1}: {e}")
+            st.session_state["last_error"] = traceback.format_exc()
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+    transcript = "\n".join(all_transcripts)
+    segments = all_segments
 
     if transcript:
         st.success("✅ Transcriptie voltooid")

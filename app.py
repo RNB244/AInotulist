@@ -109,6 +109,10 @@ with st.sidebar:
         placeholder="Bijv. namen, vakjargon, bedrijfsnamen",
         help="Wordt als hint meegegeven aan Whisper voor betere herkenning."
     )
+    chunk_minutes = st.slider(
+        "Chunk-lengte (minuten)", 5, 20, 10,
+        help="Lange opnames worden automatisch in stukken verwerkt om time-outs te vermijden."
+    )
 
     st.markdown("---")
     st.header("🧩 Vragenlijst")
@@ -161,17 +165,26 @@ if audio_bytes:
     st.info("Bezig met transcriberen... ⏳")
     transcript = ""
     segments = []
-    chunk_minutes = 10
     audio_chunks = split_audio_bytes(audio_bytes, chunk_minutes=chunk_minutes)
     all_transcripts = []
     all_segments = []
-    model = get_whisper_model(model_size)
+    # Model laden met foutafhandeling
+    try:
+        model = get_whisper_model(model_size)
+    except Exception as e:
+        st.error("Kon Whisper-model niet laden.")
+        st.session_state["last_error"] = traceback.format_exc()
+        st.exception(e)
+        model = None
+    progress = st.progress(0)
     for i, chunk in enumerate(audio_chunks):
         st.info(f"Transcriberen deel {i+1} van {len(audio_chunks)}...")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
             tmp_path = tmp.name
         try:
             export_chunk_to_wav(chunk, tmp_path, cleanup=cleanup_audio)
+            if model is None:
+                raise RuntimeError("Model niet geladen; transcriptie afgebroken.")
             transcribe_kwargs = dict(
                 language="nl",
                 fp16=False,
@@ -187,12 +200,14 @@ if audio_bytes:
         except Exception as e:
             st.error(f"Fout bij deel {i+1}: {e}")
             st.session_state["last_error"] = traceback.format_exc()
+            st.exception(e)
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 try:
                     os.remove(tmp_path)
                 except Exception:
                     pass
+        progress.progress(int(((i+1)/max(1,len(audio_chunks)))*100))
     transcript = "\n".join(all_transcripts)
     segments = all_segments
 

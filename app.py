@@ -28,6 +28,10 @@ try:
 except Exception:
     HAVE_PYDUB = False
 
+# Vragenlijst helpers
+from questionnaire import load_questions_from_docx, assign_segments_to_questions, flatten_mapping_to_text
+from utils_questionnaire import build_docx_with_notes
+
 # Helper voor bestandsnamen
 def get_filename(base, ext, title=None):
     date = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -66,6 +70,24 @@ with st.sidebar:
         help="Wordt als hint meegegeven aan Whisper voor betere herkenning."
     )
 
+    st.markdown("---")
+    st.header("🧩 Vragenlijst")
+    uploaded_docx = st.file_uploader("Upload je standaard vragenlijst (.docx)", type=["docx"])
+    questions = []
+    if uploaded_docx:
+        try:
+            questions = load_questions_from_docx(uploaded_docx)
+            st.success(f"{len(questions)} vragen geladen uit je .docx")
+            with st.expander("Voorbeeld van ingelezen vragen"):
+                for i, q in enumerate(questions[:10], start=1):
+                    st.markdown(f"**{i}.** {q}")
+                if len(questions) > 10:
+                    st.caption(f"... en {len(questions)-10} meer")
+        except Exception as e:
+            st.error(f"Kon vragenlijst niet inlezen: {e}")
+    auto_assign = st.checkbox("Automatisch toewijzen aan vragen", value=True)
+    threshold = st.slider("Match drempel (hoger = strenger)", 40, 90, 55, step=1)
+
 # Meeting-titel invoer
 meeting_title = st.text_input("Meeting titel (optioneel)", "")
 
@@ -90,16 +112,17 @@ if mode == "🎙️ Opnemen":
         except Exception:
             st.warning("Audio opnemen niet beschikbaar. Gebruik upload.")
 elif mode == "📁 Uploaden":
-    uploaded = st.file_uploader("Upload MP3 of WAV", type=["mp3", "wav"])
+    uploaded = st.file_uploader("Upload MP3, WAV of M4A", type=["mp3", "wav", "m4a"])
     if uploaded:
         audio_bytes = uploaded.read()
 
+
 if audio_bytes:
     st.info("Bezig met transcriberen... ⏳")
-    # Schrijf naar tijdelijk bestand zodat ffmpeg/whisper het kan lezen
     tmp_path = None
+    transcript = ""
+    segments = []
     try:
-        # Maak een tijdelijk WAV-bestand, eventueel met audio-cleanup (mono, 16k, normalisatie)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
             tmp_path = tmp.name
         if HAVE_PYDUB and cleanup_audio:
@@ -108,21 +131,17 @@ if audio_bytes:
                 seg = seg.set_channels(1)
                 seg = seg.set_frame_rate(16000)
                 seg = effects.normalize(seg)
-                # eenvoudige high-pass om lage brom te verminderen
                 seg = seg.high_pass_filter(100)
                 seg.export(tmp_path, format="wav")
             except Exception:
-                # val terug op ruwe bytes
                 with open(tmp_path, "wb") as f:
                     f.write(audio_bytes)
         else:
             with open(tmp_path, "wb") as f:
                 f.write(audio_bytes)
 
-        # Laad (of hergebruik) model
         model = get_whisper_model(model_size)
         with st.spinner("Transcriptie in uitvoering…"):
-            # CPU-vriendelijk en nauwkeuriger decode: beam search + NL hint
             transcribe_kwargs = dict(
                 language="nl",
                 fp16=False,
@@ -134,14 +153,13 @@ if audio_bytes:
                 transcribe_kwargs["initial_prompt"] = custom_prompt
             result = model.transcribe(tmp_path, **transcribe_kwargs)
         transcript = result.get("text", "")
+        segments = result.get("segments", []) or []
     except Exception as e:
         st.error("Er ging iets mis tijdens de transcriptie.")
-        # Bewaar laatste exception voor diagnosepaneel
         st.session_state["last_error"] = traceback.format_exc()
         st.exception(e)
         transcript = ""
     finally:
-        # Opruimen van temp bestand
         if tmp_path and os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
@@ -152,14 +170,12 @@ if audio_bytes:
         st.success("✅ Transcriptie voltooid")
     st.subheader("📝 Transcriptie")
 
-    # Zoekfunctie in transcriptie
     search_query = st.text_input("🔍 Zoek in transcriptie", "")
     if search_query:
         found = [line for line in transcript.splitlines() if search_query.lower() in line.lower()]
         st.text_area("Resultaten", "\n".join(found) if found else "Geen resultaten.", height=150)
     st.text_area("Volledige transcriptie", transcript, height=250)
 
-    # Downloadbare transcriptie
     transcript_filename = get_filename("transcript", "txt", meeting_title)
     st.download_button("⬇️ Download transcriptie", transcript.encode(), file_name=transcript_filename)
 
@@ -179,7 +195,6 @@ if audio_bytes:
         for a in actions:
             st.markdown(f"- {a}")
 
-    # Downloadbare actiepunten
     if actions:
         actions_filename = get_filename("actiepunten", "txt", meeting_title)
         st.download_button("⬇️ Download actiepunten", "\n".join(actions).encode(), file_name=actions_filename)
@@ -188,7 +203,6 @@ if audio_bytes:
     pdf_filename = get_filename("samenvatting", "pdf", meeting_title)
     st.download_button("⬇️ Download PDF", pdf_file, file_name=pdf_filename)
 
-    # Save summary PDF locally (non-persistent op Cloud, maar handig lokaal)
     try:
         summaries_dir = "summaries"
         if not os.path.exists(summaries_dir):
@@ -196,8 +210,58 @@ if audio_bytes:
         with open(os.path.join(summaries_dir, pdf_filename), "wb") as f:
             f.write(pdf_file)
     except Exception:
-        # Geen fatale fout als we niet kunnen schrijven
         pass
+
+    # ====== Per-vraag notulen ======
+    if transcript and questions:
+        st.subheader("🧠 Notulen per vraag")
+        notes_per_question = {}
+        actions_per_question = {}
+        debug = []
+        if auto_assign and segments:
+            mapping, debug = assign_segments_to_questions(segments, questions, threshold=threshold, sequential=True)
+            merged = flatten_mapping_to_text(mapping)
+            for idx in range(len(questions)):
+                text_for_q = merged.get(idx, "").strip()
+                if not text_for_q:
+                    notes_per_question[idx] = []
+                    actions_per_question[idx] = []
+                    continue
+                q_summary, q_actions = summarize_text(text_for_q, "Bulletpoints")
+                bullets = [ln.strip("- ").strip() for ln in q_summary.splitlines() if ln.strip()]
+                notes_per_question[idx] = bullets
+                actions_per_question[idx] = q_actions or []
+        else:
+            st.info("Automatische toewijzing uitgeschakeld of geen segmenten beschikbaar.")
+
+        for i, q in enumerate(questions):
+            with st.expander(f"Vraag {i+1}: {q}"):
+                bullets = notes_per_question.get(i, [])
+                if bullets:
+                    for b in bullets:
+                        st.markdown(f"- {b}")
+                else:
+                    st.caption("Geen notulen aan deze vraag gekoppeld.")
+                acts = actions_per_question.get(i, [])
+                if acts:
+                    st.markdown("**Actiepunten:**")
+                    for a in acts:
+                        st.markdown(f"- {a}")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if summary:
+                st.download_button("⬇️ Download PDF (globaal)", data=pdf_file, file_name=pdf_filename)
+        with col2:
+            docx_bytes = build_docx_with_notes(
+                title=f"Notulen projectevaluatie – {datetime.now().strftime('%Y-%m-%d')}",
+                questions=questions,
+                notes_per_question=notes_per_question,
+                actions_per_question=actions_per_question,
+                global_summary=summary,
+                global_actions=actions
+            )
+            st.download_button("⬇️ Download Word (alles)", data=docx_bytes, file_name=f"notulen_{datetime.now().strftime('%Y-%m-%d')}.docx")
 
 st.markdown("""
 <style>

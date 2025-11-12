@@ -44,6 +44,30 @@ def split_audio_bytes(audio_bytes, chunk_minutes=10):
         chunks.append(seg[start:end])
     return chunks
 
+# Helper: export a chunk (AudioSegment or bytes) to a wav file path
+def export_chunk_to_wav(chunk, tmp_path: str, cleanup: bool):
+    """
+    Export one chunk to wav at tmp_path.
+    - If chunk is an AudioSegment: optional cleanup, then export.
+    - If chunk is bytes: write raw bytes; ffmpeg will decode by content.
+    """
+    # If we have an AudioSegment
+    if HAVE_PYDUB and 'AudioSegment' in globals() and isinstance(chunk, AudioSegment):
+        seg = chunk
+        if cleanup:
+            seg = seg.set_channels(1).set_frame_rate(16000)
+            seg = effects.normalize(seg)
+            seg = seg.high_pass_filter(100)
+        seg.export(tmp_path, format="wav")
+        return
+    # Fallback: chunk as bytes
+    if isinstance(chunk, (bytes, bytearray)):
+        with open(tmp_path, "wb") as f:
+            f.write(chunk)
+        return
+    # Last resort: raise to be caught by caller
+    raise TypeError("Unsupported chunk type for export")
+
 # Vragenlijst helpers
 from questionnaire import load_questions_from_docx, assign_segments_to_questions, flatten_mapping_to_text
 from utils_questionnaire import build_docx_with_notes
@@ -147,13 +171,7 @@ if audio_bytes:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
             tmp_path = tmp.name
         try:
-            if HAVE_PYDUB and cleanup_audio:
-                seg = chunk.set_channels(1).set_frame_rate(16000)
-                seg = effects.normalize(seg)
-                seg = seg.high_pass_filter(100)
-                seg.export(tmp_path, format="wav")
-            else:
-                chunk.export(tmp_path, format="wav")
+            export_chunk_to_wav(chunk, tmp_path, cleanup=cleanup_audio)
             transcribe_kwargs = dict(
                 language="nl",
                 fp16=False,

@@ -9,7 +9,6 @@ try:
 except Exception:
     HAVE_RECORDER = False
     RECORDER_KIND = None
-import whisper
 from summarize import summarize_text
 from utils import save_pdf
 from datetime import datetime
@@ -85,11 +84,16 @@ st.set_page_config(page_title="AI Vergader Samenvatter", layout="centered")
 st.title("🎧 AI Vergader Samenvatter")
 st.markdown("Neem op of upload audio → krijg transcript + samenvatting.")
 
-# Whisper modelkeuze (Cloud-vriendelijk standaard 'base') en caching
+# Whisper modelkeuze (Cloud-vriendelijk) en lazy import + caching
 @st.cache_resource(show_spinner=False)
 def get_whisper_model(name: str):
     # Forceer CPU in de cloud en voorkom half-precision issues
-    return whisper.load_model(name, device="cpu")
+    try:
+        import whisper  # lazy import to avoid startup crashes
+        return whisper.load_model(name, device="cpu")
+    except Exception:
+        st.session_state["last_error"] = traceback.format_exc()
+        raise
 
 with st.sidebar:
     model_size = st.selectbox(
@@ -321,10 +325,15 @@ button, .stButton>button {font-size:18px !important; padding:16px 32px; border-r
 with st.expander("🔎 Diagnostiek"):
     try:
         import torch
+        try:
+            import whisper as _whisper
+            whisper_version = getattr(_whisper, "__version__", "unknown")
+        except Exception:
+            whisper_version = "import failed"
         device = "cuda" if getattr(torch, "cuda", None) and torch.cuda.is_available() else "cpu"
         st.write({
             "python": sys.version.split(" ")[0],
-            "whisper_version": getattr(whisper, "__version__", "unknown"),
+            "whisper_version": whisper_version,
             "torch_version": getattr(torch, "__version__", "not installed"),
             "device": device,
             "ffmpeg_path": shutil.which("ffmpeg"),
